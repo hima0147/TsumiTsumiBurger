@@ -1,7 +1,7 @@
 using UnityEngine;
-using UnityEngine.UI; // UI画像操作に必要
 using TMPro;
-using UnityEngine.SceneManagement; // シーン読み込みに必要
+using UnityEngine.SceneManagement;
+using System;
 using System.Collections.Generic;
 
 public class GameManager : MonoBehaviour
@@ -13,30 +13,29 @@ public class GameManager : MonoBehaviour
     [SerializeField] private float[] laneXPositions;
     [SerializeField] private float bottomYPosition = -3.5f;
 
-    [Header("UI")]
+    [Header("UI設定")]
     [SerializeField] private TextMeshProUGUI scoreText;
     [SerializeField] private TextMeshProUGUI timerText;
+    [SerializeField] private GameObject resultPanel;
+    [SerializeField] private TextMeshProUGUI resultText;
+    [SerializeField] private GameObject continuePanel;
 
-    [Header("リザルト画面設定")]
-    [SerializeField] private GameObject resultPanel; // リザルト画面全体
-    [SerializeField] private TextMeshProUGUI resultText; // 個数表示
-    [SerializeField] private Transform bestBurgerContainer; // バーガーを積む場所
-    [SerializeField] private Button returnButton; // 戻るボタン
+    [Header("ゲーム設定")]
+    [SerializeField] private float gameTime = 30.0f;
 
     private int score = 0;
-    private int burgerCount = 0; // 作った個数
-    private float timeLimit = 30.0f;
+    private float currentTimer;
+    private bool isPlaying = false;
+    private bool isLastOrder = false;
 
-    private bool isLastOrder = false; // ラストオーダー中か？
-    // 他のスクリプトから「ラストオーダー中？」と聞けるようにする窓口
+    // ★追加：コンティニューを使ったかどうか
+    private bool hasContinued = false;
+
+    // 補充待ちリスト
+    private bool[] pendingRefills;
+
+    public bool IsPlaying => isPlaying;
     public bool IsLastOrder => isLastOrder;
-    private bool isGameOver = false;  // 完全に終わったか？
-
-    // 現在画面内にある下バンズの数（これが0になったらゲーム終了）
-    private int activeBottomBuns = 0;
-
-    // 一番背の高かったバーガーの画像リスト
-    private List<Sprite> bestBurgerSprites = new List<Sprite>();
 
     private void Awake()
     {
@@ -45,173 +44,182 @@ public class GameManager : MonoBehaviour
 
     private void Start()
     {
-        // リザルト画面を隠す
-        if (resultPanel != null) resultPanel.SetActive(false);
-
-        // ボタンに機能を登録
-        if (returnButton != null)
-        {
-            returnButton.onClick.AddListener(OnReturnTitle);
-        }
-
-        // 下バンズ配置
-        for (int i = 0; i < 4; i++)
-        {
-            SpawnBottomBun(i);
-        }
-        UpdateUI();
+        StartGame();
     }
 
     private void Update()
     {
-        if (isGameOver) return;
-
-        // タイマー処理
-        if (timeLimit > 0)
+        if (isPlaying)
         {
-            timeLimit -= Time.deltaTime;
-            if (timeLimit <= 0)
+            currentTimer -= Time.deltaTime;
+            UpdateTimerText();
+
+            if (currentTimer <= 0)
             {
-                timeLimit = 0;
-                StartLastOrder(); // 時間切れ＝ラストオーダー開始
+                OnTimeUp();
             }
         }
+    }
 
-        // UI表示更新
-        timerText.text = Mathf.Ceil(timeLimit).ToString();
+    public void StartGame()
+    {
+        score = 0;
+        currentTimer = gameTime;
+        isPlaying = true;
+        isLastOrder = false;
+        hasContinued = false; // ★リセットする
 
-        // ラストオーダー表示（文字を赤くするなど）
+        if (laneXPositions != null)
+        {
+            pendingRefills = new bool[laneXPositions.Length];
+        }
+
+        UpdateScoreText();
+        UpdateTimerText();
+
+        if (resultPanel != null) resultPanel.SetActive(false);
+        if (continuePanel != null) continuePanel.SetActive(false);
+
+        // 初期配置
+        if (laneXPositions != null && bottomBunPrefab != null)
+        {
+            for (int i = 0; i < laneXPositions.Length; i++)
+            {
+                RefillLane(i);
+            }
+        }
+    }
+
+    public void RefillLane(int laneIndex)
+    {
+        if (laneIndex < 0 || laneIndex >= laneXPositions.Length) return;
+
+        // ラストオーダー中ならメモする
         if (isLastOrder)
         {
-            timerText.color = Color.red;
-            timerText.text = "LAST!";
+            if (pendingRefills != null) pendingRefills[laneIndex] = true;
+            return;
         }
+
+        Vector3 spawnPos = new Vector3(laneXPositions[laneIndex], bottomYPosition, 0);
+        Instantiate(bottomBunPrefab, spawnPos, Quaternion.identity);
     }
 
-    // ラストオーダー開始
-    private void StartLastOrder()
+    private void OnTimeUp()
     {
+        isPlaying = false;
         isLastOrder = true;
-        Debug.Log("ラストオーダー！補充ストップ！");
 
-        // もしこの時点で下バンズが1つもなければ即終了
-        if (activeBottomBuns <= 0)
+        // ★変更：コンティニュー画面を出すのは「まだコンティニューしてない時」だけ
+        if (!hasContinued && continuePanel != null)
         {
-            FinishGame();
+            continuePanel.SetActive(true);
+        }
+        else
+        {
+            // 2回目以降、またはパネルがない場合は即終了
+            EndGame();
         }
     }
 
-    public void AddScore(int points, List<GameObject> parts)
+    public void OnClickWatchAd()
     {
-        if (isGameOver) return;
-
-        score += points;
-        burgerCount++; // 個数を増やす
-
-        // 一番高いバーガーかチェックして記録
-        SaveBestBurger(parts);
-
-        UpdateUI();
+        if (AdsManager.Instance != null)
+        {
+            AdsManager.Instance.ShowRewardAd(() =>
+            {
+                ResumeGameWithBonus();
+            });
+        }
+        else
+        {
+            Debug.LogWarning("AdsManagerテスト：そのまま復活させます。");
+            ResumeGameWithBonus();
+        }
     }
 
-    // 一番高いバーガーなら画像を保存しておく
-    private void SaveBestBurger(List<GameObject> parts)
+    private void ResumeGameWithBonus()
     {
-        // 今回の高さ（パーツ数）が、記録より多かったら更新
-        if (parts.Count > bestBurgerSprites.Count)
-        {
-            bestBurgerSprites.Clear();
+        currentTimer = 10.0f;
+        isPlaying = true;
+        isLastOrder = false;
+        hasContinued = true; // ★「もう使ったよ」と記録する
 
-            // 下から順に画像を保存（BottomBun -> ... -> TopBun）
-            // partsリストはBurgerJudgeで上から順に追加されているので、逆順にする
-            for (int i = parts.Count - 1; i >= 0; i--)
+        if (continuePanel != null) continuePanel.SetActive(false);
+
+        // 待機中のバンズを復活
+        if (pendingRefills != null)
+        {
+            for (int i = 0; i < pendingRefills.Length; i++)
             {
-                SpriteRenderer sr = parts[i].GetComponent<SpriteRenderer>();
-                if (sr != null)
+                if (pendingRefills[i])
                 {
-                    bestBurgerSprites.Add(sr.sprite);
+                    RefillLane(i);
+                    pendingRefills[i] = false;
                 }
             }
         }
     }
 
-    private void UpdateUI()
+    public void OnClickNoThanks()
     {
-        scoreText.text = "SCORE: " + score.ToString();
+        if (continuePanel != null) continuePanel.SetActive(false);
+        EndGame();
     }
 
-    public void SpawnBottomBun(int laneIndex)
+    private void EndGame()
     {
-        Vector3 spawnPos = new Vector3(laneXPositions[laneIndex], bottomYPosition, 0);
-        GameObject bun = Instantiate(bottomBunPrefab, spawnPos, Quaternion.identity);
-        Rigidbody2D rb = bun.GetComponent<Rigidbody2D>();
-        rb.bodyType = RigidbodyType2D.Kinematic;
+        isPlaying = false;
+        isLastOrder = true;
 
-        activeBottomBuns++; // バンズ数をカウント
-    }
-
-    public void RefillLane(int laneIndex)
-    {
-        activeBottomBuns--; // 1つ完成したので減らす
-
-        // ラストオーダー中は補充しない！
-        if (isLastOrder)
-        {
-            // 全てのバンズが無くなったらゲーム終了
-            if (activeBottomBuns <= 0)
-            {
-                FinishGame();
-            }
-            return;
-        }
-
-        StartCoroutine(RefillCoroutine(laneIndex));
-    }
-
-    private System.Collections.IEnumerator RefillCoroutine(int laneIndex)
-    {
-        yield return new WaitForSeconds(1.0f);
-        SpawnBottomBun(laneIndex);
-    }
-
-    // 本当のゲーム終了
-    private void FinishGame()
-    {
-        isGameOver = true;
-        Debug.Log("全オーダー終了！リザルトへ");
-        ShowResult();
-    }
-
-    private void ShowResult()
-    {
         if (resultPanel != null)
         {
             resultPanel.SetActive(true);
-            resultText.text = burgerCount + "こ できたよ！";
 
-            // 一番大きかったバーガーをUIで再現
-            // リストを逆順（上から下の順）にループして表示していく
-            for (int i = bestBurgerSprites.Count - 1; i >= 0; i--)
+            string comment = "";
+            if (score >= 2000) comment = "すごい！ ハンバーガーの神様！";
+            else if (score >= 1000) comment = "ナイス！ 達人級の腕前！";
+            else if (score >= 500) comment = "おいしそう！ いい感じ！";
+            else comment = "次はもっと積めるはず！";
+
+            if (resultText != null)
             {
-                Sprite sprite = bestBurgerSprites[i];
-
-                // 新しい画像オブジェクトを作る
-                GameObject imgObj = new GameObject("BurgerPart");
-                // 第2引数を false にすることで、余計な位置ズレを防ぐ
-                imgObj.transform.SetParent(bestBurgerContainer, false);
-
-                // Imageコンポーネントをつけて画像を表示
-                Image img = imgObj.AddComponent<Image>();
-                img.sprite = sprite;
-                img.preserveAspect = true; // 縦横比を維持
+                resultText.text = $"スコア: {score}\n{comment}";
             }
         }
     }
 
-    // タイトルへ戻る（今はシーンをリロード）
+    public void AddScore(int amount)
+    {
+        if (!isPlaying && !isLastOrder) return;
+        score += amount;
+        UpdateScoreText();
+    }
+
+    public void AddScore(int amount, List<GameObject> ingredients)
+    {
+        AddScore(amount);
+    }
+
+    private void UpdateScoreText()
+    {
+        if (scoreText != null) scoreText.text = "Score: " + score;
+    }
+
+    private void UpdateTimerText()
+    {
+        if (timerText != null)
+        {
+            float displayTime = Mathf.Max(0, currentTimer);
+            timerText.text = "Time: " + displayTime.ToString("F1");
+
+            if (displayTime <= 5.0f) timerText.color = Color.red;
+            else timerText.color = Color.white;
+        }
+    }
+
     public void OnReturnTitle()
     {
-        // 「TitleScene」という名前のシーンへ移動する
         SceneManager.LoadScene("TitleScene");
     }
 }

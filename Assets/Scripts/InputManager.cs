@@ -9,6 +9,9 @@ public class InputManager : MonoBehaviour
 
     private void Update()
     {
+        // ゲーム中じゃなければ、タッチ入力を無視して何もしない
+        if (GameManager.Instance == null || !GameManager.Instance.IsPlaying) return;
+
         // マウス左クリック（スマホならタップ）が離された瞬間
         if (Input.GetMouseButtonUp(0))
         {
