@@ -1,7 +1,6 @@
 using UnityEngine;
 using TMPro;
 using UnityEngine.SceneManagement;
-using System;
 using System.Collections.Generic;
 
 public class GameManager : MonoBehaviour
@@ -18,21 +17,23 @@ public class GameManager : MonoBehaviour
     [SerializeField] private TextMeshProUGUI timerText;
     [SerializeField] private GameObject resultPanel;
     [SerializeField] private TextMeshProUGUI resultText;
-    [SerializeField] private GameObject continuePanel;
 
     [Header("ゲーム設定")]
-    [SerializeField] private float gameTime = 30.0f;
+    [SerializeField] private float gameTime = 60.0f;
+
+    // チャンピオンを一時的に隠しておく場所（画面外）
+    private Vector3 hidingSpot = new Vector3(500f, 500f, 0f);
+    // 最後にチャンピオンをお披露目する場所（画面中央の下の方）
+    private Vector3 showRoomPos = new Vector3(0f, -2.5f, 0f);
 
     private int score = 0;
     private float currentTimer;
     private bool isPlaying = false;
     private bool isLastOrder = false;
 
-    // ★追加：コンティニューを使ったかどうか
-    private bool hasContinued = false;
-
-    // 補充待ちリスト
-    private bool[] pendingRefills;
+    // 記録保持用
+    private GameObject currentChampion; // 現在の1位のクローン（親オブジェクト）
+    private int maxStackRecord = -1;    // 現在の最高段数
 
     public bool IsPlaying => isPlaying;
     public bool IsLastOrder => isLastOrder;
@@ -44,6 +45,15 @@ public class GameManager : MonoBehaviour
 
     private void Start()
     {
+        // Canvasがカメラを見失わないように再設定する
+        Canvas[] canvases = FindObjectsOfType<Canvas>();
+        foreach (var c in canvases)
+        {
+            if (c.renderMode == RenderMode.ScreenSpaceCamera && c.worldCamera == null)
+            {
+                c.worldCamera = Camera.main;
+            }
+        }
         StartGame();
     }
 
@@ -51,12 +61,91 @@ public class GameManager : MonoBehaviour
     {
         if (isPlaying)
         {
-            currentTimer -= Time.deltaTime;
-            UpdateTimerText();
-
-            if (currentTimer <= 0)
+            if (!isLastOrder)
             {
-                OnTimeUp();
+                currentTimer -= Time.deltaTime;
+                UpdateTimerText();
+
+                if (currentTimer <= 0)
+                {
+                    OnTimeUp();
+                }
+            }
+            else
+            {
+                // ラストオーダー中：画面内のプレイ用バンズがなくなるのを待つ
+                GameObject[] remainingBuns = GameObject.FindGameObjectsWithTag("BottomBun");
+                if (remainingBuns.Length == 0)
+                {
+                    EndGame();
+                }
+            }
+        }
+    }
+
+    // BurgerJudgeから呼ばれる関数
+    // リストを受け取ってクローンを作る関数
+    public void CheckRecordAndCloneList(List<GameObject> parts)
+    {
+        int stackCount = parts.Count;
+
+        if (stackCount >= maxStackRecord)
+        {
+            maxStackRecord = stackCount;
+
+            // 前のチャンピオンがいれば消す
+            if (currentChampion != null)
+            {
+                Destroy(currentChampion);
+            }
+
+            // 基準点（下のバンズ）を探す
+            GameObject basePart = null;
+            foreach (var p in parts)
+            {
+                if (p.CompareTag("BottomBun"))
+                {
+                    basePart = p;
+                    break;
+                }
+            }
+            if (basePart == null && parts.Count > 0) basePart = parts[0];
+
+            Vector3 anchorPos = basePart.transform.position;
+
+            // 親オブジェクト作成
+            currentChampion = new GameObject("ChampionBurger");
+            currentChampion.transform.position = hidingSpot;
+
+            foreach (GameObject originalPart in parts)
+            {
+                if (originalPart == null) continue;
+
+                GameObject clonePart = Instantiate(originalPart, currentChampion.transform);
+
+                // 位置合わせ
+                Vector3 relativePos = originalPart.transform.position - anchorPos;
+                clonePart.transform.localPosition = relativePos;
+
+                // ★修正箇所：SpriteRendererの処理を1回にまとめました
+                SpriteRenderer sr = clonePart.GetComponent<SpriteRenderer>();
+                if (sr != null)
+                {
+                    sr.sortingOrder = 5;     // 表示順を「5」に（背景と文字の間）
+                    sr.color = Color.white;  // 色を白に戻す
+                }
+
+                // 不要なコンポーネントの削除
+                clonePart.tag = "Untagged";
+
+                var rb = clonePart.GetComponent<Rigidbody2D>();
+                if (rb != null) Destroy(rb);
+
+                var col = clonePart.GetComponent<Collider2D>();
+                if (col != null) Destroy(col);
+
+                var judge = clonePart.GetComponent<BurgerJudge>();
+                if (judge != null) Destroy(judge);
             }
         }
     }
@@ -67,20 +156,16 @@ public class GameManager : MonoBehaviour
         currentTimer = gameTime;
         isPlaying = true;
         isLastOrder = false;
-        hasContinued = false; // ★リセットする
 
-        if (laneXPositions != null)
-        {
-            pendingRefills = new bool[laneXPositions.Length];
-        }
+        // 記録リセット
+        maxStackRecord = -1;
+        if (currentChampion != null) Destroy(currentChampion);
 
         UpdateScoreText();
         UpdateTimerText();
-
         if (resultPanel != null) resultPanel.SetActive(false);
-        if (continuePanel != null) continuePanel.SetActive(false);
+        if (timerText != null) timerText.color = Color.white;
 
-        // 初期配置
         if (laneXPositions != null && bottomBunPrefab != null)
         {
             for (int i = 0; i < laneXPositions.Length; i++)
@@ -93,13 +178,7 @@ public class GameManager : MonoBehaviour
     public void RefillLane(int laneIndex)
     {
         if (laneIndex < 0 || laneIndex >= laneXPositions.Length) return;
-
-        // ラストオーダー中ならメモする
-        if (isLastOrder)
-        {
-            if (pendingRefills != null) pendingRefills[laneIndex] = true;
-            return;
-        }
+        if (isLastOrder) return;
 
         Vector3 spawnPos = new Vector3(laneXPositions[laneIndex], bottomYPosition, 0);
         Instantiate(bottomBunPrefab, spawnPos, Quaternion.identity);
@@ -107,64 +186,12 @@ public class GameManager : MonoBehaviour
 
     private void OnTimeUp()
     {
-        isPlaying = false;
         isLastOrder = true;
-
-        // ★変更：コンティニュー画面を出すのは「まだコンティニューしてない時」だけ
-        if (!hasContinued && continuePanel != null)
+        if (timerText != null)
         {
-            continuePanel.SetActive(true);
+            timerText.text = "FINISH!!";
+            timerText.color = Color.red;
         }
-        else
-        {
-            // 2回目以降、またはパネルがない場合は即終了
-            EndGame();
-        }
-    }
-
-    public void OnClickWatchAd()
-    {
-        if (AdsManager.Instance != null)
-        {
-            AdsManager.Instance.ShowRewardAd(() =>
-            {
-                ResumeGameWithBonus();
-            });
-        }
-        else
-        {
-            Debug.LogWarning("AdsManagerテスト：そのまま復活させます。");
-            ResumeGameWithBonus();
-        }
-    }
-
-    private void ResumeGameWithBonus()
-    {
-        currentTimer = 10.0f;
-        isPlaying = true;
-        isLastOrder = false;
-        hasContinued = true; // ★「もう使ったよ」と記録する
-
-        if (continuePanel != null) continuePanel.SetActive(false);
-
-        // 待機中のバンズを復活
-        if (pendingRefills != null)
-        {
-            for (int i = 0; i < pendingRefills.Length; i++)
-            {
-                if (pendingRefills[i])
-                {
-                    RefillLane(i);
-                    pendingRefills[i] = false;
-                }
-            }
-        }
-    }
-
-    public void OnClickNoThanks()
-    {
-        if (continuePanel != null) continuePanel.SetActive(false);
-        EndGame();
     }
 
     private void EndGame()
@@ -172,15 +199,17 @@ public class GameManager : MonoBehaviour
         isPlaying = false;
         isLastOrder = true;
 
+        // ★ここでチャンピオンをお披露目！
+        ShowChampionBurger();
+
         if (resultPanel != null)
         {
             resultPanel.SetActive(true);
 
             string comment = "";
-            if (score >= 2000) comment = "すごい！ ハンバーガーの神様！";
-            else if (score >= 1000) comment = "ナイス！ 達人級の腕前！";
-            else if (score >= 500) comment = "おいしそう！ いい感じ！";
-            else comment = "次はもっと積めるはず！";
+            if (score >= 2000) comment = "ハンバーガーの神様！";
+            else if (score >= 1000) comment = "達人級の腕前！";
+            else comment = "次はもっと積める！";
 
             if (resultText != null)
             {
@@ -189,37 +218,43 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    public void AddScore(int amount)
+    private void ShowChampionBurger()
     {
-        if (!isPlaying && !isLastOrder) return;
-        score += amount;
-        UpdateScoreText();
+        // 1. 画面に残っているゴミ（作りかけのバンズなど）を掃除する
+        // "BottomBun"タグがついているものを全部消す
+        GameObject[] leftovers = GameObject.FindGameObjectsWithTag("BottomBun");
+        foreach (var obj in leftovers)
+        {
+            Destroy(obj);
+        }
+
+        // 2. 隠しておいたチャンピオンを、画面中央（ショールーム）に移動させる
+        if (currentChampion != null)
+        {
+            currentChampion.transform.position = showRoomPos;
+
+            // カメラのズーム調整（高すぎるなら引く）
+            if (Camera.main != null)
+            {
+                // 基本サイズ5 + 段数 * 0.2
+                // カメラの位置は動かさない！（背景が消えるから）
+                Camera.main.orthographicSize = 5.0f + (maxStackRecord * 0.2f);
+            }
+        }
     }
 
-    public void AddScore(int amount, List<GameObject> ingredients)
-    {
-        AddScore(amount);
-    }
-
-    private void UpdateScoreText()
-    {
-        if (scoreText != null) scoreText.text = "Score: " + score;
-    }
-
+    public void AddScore(int amount) { score += amount; UpdateScoreText(); }
+    public void AddScore(int amount, List<GameObject> ingredients) { AddScore(amount); }
+    private void UpdateScoreText() { if (scoreText != null) scoreText.text = "Score: " + score; }
     private void UpdateTimerText()
     {
+        if (isLastOrder) return;
         if (timerText != null)
         {
             float displayTime = Mathf.Max(0, currentTimer);
             timerText.text = "Time: " + displayTime.ToString("F1");
-
             if (displayTime <= 5.0f) timerText.color = Color.red;
-            else timerText.color = Color.white;
         }
     }
-
-    public void OnReturnTitle()
-    {
-        SceneManager.LoadScene("TitleScene");
-    }
+    public void OnReturnTitle() { SceneManager.LoadScene("TitleScene"); }
 }
